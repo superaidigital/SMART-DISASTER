@@ -6,7 +6,7 @@
 
 // 1. Configuration Constants (ย้ายมาไว้ที่นี่เพื่อให้แก้ไขจุดเดียว)
 define('DB_HOST', 'localhost');
-define('DB_NAME', 'evacuation_db');
+define('DB_NAME', 'evac_plus_db');
 define('DB_USER', 'root');
 define('DB_PASS', ''); 
 define('DB_CHARSET', 'utf8mb4');

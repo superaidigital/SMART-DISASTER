@@ -1,177 +1,229 @@
 <?php
-/**
- * shelter_details.php
- * หน้าแสดงรายละเอียดเชิงลึกของศูนย์พักพิงและรายชื่อผู้อพยพภายในศูนย์
- * ปรับปรุง: รองรับ MySQLi และจัดการปัญหาคอลัมน์อายุ (Age/Birth Date)
- */
-
+session_start();
 require_once 'config/db.php';
-require_once 'includes/functions.php';
-require_once 'includes/header.php';
+include 'includes/header.php';
 
-// 1. รับค่า ID และตรวจสอบความปลอดภัย
-$shelter_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+// รับค่า ID ศูนย์พักพิง
+$shelter_id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
-if ($shelter_id <= 0) {
-    echo "<div class='alert alert-danger shadow-sm rounded-3'><i class='fas fa-exclamation-circle me-2'></i>ไม่ระบุรหัสศูนย์พักพิง</div>";
-    include 'includes/footer.php';
-    exit;
+if ($shelter_id == 0) {
+    header("Location: index.php");
+    exit();
 }
 
-try {
-    // 2. ดึงข้อมูลรายละเอียดศูนย์พักพิง
-    $sql_shelter = "SELECT s.*, i.name as incident_name 
-                    FROM shelters s 
-                    LEFT JOIN incidents i ON s.incident_id = i.id 
-                    WHERE s.id = ?";
-    $stmt = $conn->prepare($sql_shelter);
-    $stmt->bind_param("i", $shelter_id);
-    $stmt->execute();
-    $shelter = $stmt->get_result()->fetch_assoc();
+// 1. ดึงข้อมูลศูนย์พักพิง
+$sql_shelter = "SELECT * FROM shelters WHERE id = ?";
+$stmt = $conn->prepare($sql_shelter);
+$stmt->bind_param("i", $shelter_id);
+$stmt->execute();
+$shelter = $stmt->get_result()->fetch_assoc();
 
-    if (!$shelter) {
-        echo "<div class='alert alert-warning shadow-sm rounded-3'>ไม่พบข้อมูลศูนย์พักพิงในระบบ</div>";
-        include 'includes/footer.php';
-        exit;
+if (!$shelter) {
+    echo "<div class='container mt-5'><div class='alert alert-danger'>ไม่พบข้อมูลศูนย์พักพิง</div></div>";
+    exit();
+}
+
+// 2. คำนวณสถิติ (เฉพาะคนที่ยังอยู่ Active + Hospitalized)
+$stats = [
+    'total' => 0,
+    'male' => 0,
+    'female' => 0,
+    'elderly' => 0,
+    'child' => 0,
+    'patient' => 0 // ป่วย/ติดเตียง/พิการ
+];
+
+// ดึงรายชื่อคนที่ยังไม่กลับบ้าน (status != returned)
+$sql_people = "SELECT * FROM evacuees WHERE shelter_id = ? AND status != 'returned' ORDER BY registered_at DESC";
+$stmt_p = $conn->prepare($sql_people);
+$stmt_p->bind_param("i", $shelter_id);
+$stmt_p->execute();
+$result_people = $stmt_p->get_result();
+
+while ($row = $result_people->fetch_assoc()) {
+    $stats['total']++;
+    
+    // เพศ
+    if ($row['gender'] == 'male') $stats['male']++;
+    else $stats['female']++;
+
+    // กลุ่มเปราะบาง
+    if (!empty($row['vulnerable_group'])) {
+        $groups = explode(',', $row['vulnerable_group']);
+        if (in_array('elderly', $groups)) $stats['elderly']++;
+        if (in_array('child', $groups)) $stats['child']++;
+        if (in_array('bedridden', $groups) || in_array('disabled', $groups)) $stats['patient']++;
     }
+}
 
-    // 3. ดึงรายชื่อผู้อพยพที่ยังไม่แจ้งออก (Active)
-    $sql_evacuees = "SELECT * FROM evacuees WHERE shelter_id = ? AND check_out_date IS NULL ORDER BY created_at DESC";
-    $stmt_ev = $conn->prepare($sql_evacuees);
-    $stmt_ev->bind_param("i", $shelter_id);
-    $stmt_ev->execute();
-    $evacuees = $stmt_ev->get_result()->fetch_all(MYSQLI_ASSOC);
+// คำนวณความจุ
+$capacity_percent = 0;
+if ($shelter['capacity'] > 0) {
+    $capacity_percent = ($stats['total'] / $shelter['capacity']) * 100;
+}
 
-    // 4. คำนวณสถิติความหนาแน่น
-    $current_count = count($evacuees);
-    $capacity = (int)$shelter['capacity'];
-    $occupancy_rate = ($capacity > 0) ? ($current_count / $capacity) * 100 : 0;
-
-} catch (Exception $e) {
-    echo "<div class='alert alert-danger'>เกิดข้อผิดพลาด: " . h($e->getMessage()) . "</div>";
+// Helper Function แสดง Badge
+function getStatusBadge($s) {
+    if ($s == 'active') return '<span class="badge bg-success">พักอาศัยอยู่</span>';
+    if ($s == 'hospitalized') return '<span class="badge bg-danger">ส่งโรงพยาบาล</span>';
+    return '<span class="badge bg-secondary">กลับบ้านแล้ว</span>';
 }
 ?>
 
-<div class="container-fluid py-4">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <div>
-            <h2 class="fw-bold text-dark mb-0"><i class="fas fa-hospital-alt text-primary me-2"></i><?php echo h($shelter['name']); ?></h2>
-            <p class="text-muted mb-0"><i class="fas fa-map-marker-alt me-1"></i> <?php echo h($shelter['location']); ?></p>
-        </div>
-        <div class="d-flex gap-2">
-            <a href="shelter_list.php" class="btn btn-outline-secondary">กลับหน้ารายชื่อศูนย์</a>
-            <a href="evacuee_form.php?shelter_id=<?php echo $shelter_id; ?>&mode=add" class="btn btn-primary fw-bold">
-                <i class="fas fa-user-plus me-1"></i>ลงทะเบียนใหม่
-            </a>
-        </div>
-    </div>
+<!-- CSS แก้หน้าจอไม่สมส่วน -->
+<style>
+    .main-content { margin-left: 0 !important; padding: 20px !important; width: 100% !important; }
+    .footer { left: 0 !important; width: 100% !important; }
+    #vertical-menu-btn { display: none !important; }
+    
+    .stat-card { border-left: 4px solid; transition: transform 0.2s; }
+    .stat-card:hover { transform: translateY(-5px); }
+    .progress-bar-striped { animation: progress-bar-stripes 1s linear infinite; }
+</style>
 
-    <div class="row g-4">
-        <!-- ข้อมูลสถิติและสถานะศูนย์ -->
-        <div class="col-xl-4">
-            <div class="card border-0 shadow-sm rounded-4 mb-4">
-                <div class="card-body">
-                    <h6 class="fw-bold text-muted text-uppercase mb-3" style="font-size: 0.75rem; letter-spacing: 1px;">สถานะความหนาแน่น</h6>
-                    <div class="d-flex justify-content-between align-items-end mb-2">
-                        <h2 class="fw-bold mb-0"><?php echo round($occupancy_rate, 1); ?>%</h2>
-                        <span class="small text-muted"><?php echo $current_count; ?> / <?php echo $capacity; ?> คน</span>
+<div class="main-content">
+    <div class="page-content">
+        <div class="container-fluid">
+
+            <!-- Header -->
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <div>
+                    <h4 class="mb-0 text-primary fw-bold"><i class="fas fa-campground me-2"></i><?php echo htmlspecialchars($shelter['name']); ?></h4>
+                    <span class="text-muted"><i class="fas fa-map-marker-alt me-1"></i> <?php echo htmlspecialchars($shelter['location'] ?? 'ไม่ระบุที่ตั้ง'); ?></span>
+                </div>
+                <div>
+                    <a href="evacuee_form.php?shelter_id=<?php echo $shelter_id; ?>" class="btn btn-primary shadow-sm"><i class="fas fa-user-plus me-1"></i> รับผู้อพยพเพิ่ม</a>
+                    <a href="index.php" class="btn btn-outline-secondary ms-2">กลับหน้าหลัก</a>
+                </div>
+            </div>
+
+            <!-- Stats Cards -->
+            <div class="row g-3 mb-4">
+                <div class="col-md-3">
+                    <div class="card stat-card border-primary shadow-sm h-100">
+                        <div class="card-body">
+                            <h6 class="text-muted text-uppercase mb-2">ผู้อพยพปัจจุบัน</h6>
+                            <div class="d-flex align-items-center">
+                                <h2 class="mb-0 text-primary fw-bold"><?php echo $stats['total']; ?></h2>
+                                <span class="ms-2 text-muted">/ <?php echo $shelter['capacity']; ?> คน</span>
+                            </div>
+                            <!-- Progress Bar ความจุ -->
+                            <div class="progress mt-2" style="height: 6px;">
+                                <div class="progress-bar <?php echo $capacity_percent > 90 ? 'bg-danger' : 'bg-primary'; ?>" 
+                                     role="progressbar" style="width: <?php echo $capacity_percent; ?>%"></div>
+                            </div>
+                            <small class="text-muted mt-1 d-block"><?php echo number_format($capacity_percent, 1); ?>% ของความจุ</small>
+                        </div>
                     </div>
-                    <div class="progress mb-3" style="height: 12px; border-radius: 10px;">
-                        <?php 
-                            $bg_class = ($occupancy_rate >= 90) ? 'bg-danger' : (($occupancy_rate >= 70) ? 'bg-warning' : 'bg-success');
-                        ?>
-                        <div class="progress-bar <?php echo $bg_class; ?>" style="width: <?php echo min(100, $occupancy_rate); ?>%"></div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card stat-card border-warning shadow-sm h-100">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between">
+                                <div>
+                                    <h6 class="text-muted text-uppercase mb-2">ผู้สูงอายุ</h6>
+                                    <h2 class="mb-0 text-warning fw-bold"><?php echo $stats['elderly']; ?></h2>
+                                </div>
+                                <div class="text-end">
+                                    <h6 class="text-muted text-uppercase mb-2">เด็กเล็ก</h6>
+                                    <h2 class="mb-0 text-info fw-bold"><?php echo $stats['child']; ?></h2>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <hr>
-                    <div class="small">
-                        <div class="mb-2"><i class="fas fa-user-tie me-2 text-primary"></i>ผู้ประสานงาน: <strong><?php echo h($shelter['contact_person']); ?></strong></div>
-                        <div class="mb-0"><i class="fas fa-phone-alt me-2 text-success"></i>เบอร์ติดต่อ: <strong class="text-primary fs-6"><?php echo h($shelter['contact_phone']); ?></strong></div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card stat-card border-danger shadow-sm h-100">
+                        <div class="card-body">
+                            <h6 class="text-muted text-uppercase mb-2">ผู้ป่วย/ติดเตียง/พิการ</h6>
+                            <h2 class="mb-0 text-danger fw-bold"><?php echo $stats['patient']; ?></h2>
+                            <small class="text-danger"><i class="fas fa-procedures me-1"></i> ต้องการดูแลพิเศษ</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card stat-card border-success shadow-sm h-100">
+                        <div class="card-body">
+                            <h6 class="text-muted text-uppercase mb-2">เจ้าหน้าที่ดูแล</h6>
+                            <h2 class="mb-0 text-success fw-bold"><?php echo htmlspecialchars($shelter['contact_person'] ?? '-'); ?></h2>
+                            <small class="text-muted"><i class="fas fa-phone me-1"></i> <?php echo htmlspecialchars($shelter['phone'] ?? '-'); ?></small>
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <div class="card border-0 shadow-sm rounded-4 bg-primary text-white">
-                <div class="card-body">
-                    <h6 class="fw-bold mb-2"><i class="fas fa-bullhorn me-2"></i>เหตุการณ์</h6>
-                    <p class="mb-0 small opacity-75"><?php echo h($shelter['incident_name'] ?: 'การอพยพทั่วไป'); ?></p>
-                </div>
-            </div>
-        </div>
-
-        <!-- รายชื่อผู้อพยพ -->
-        <div class="col-xl-8">
-            <div class="card border-0 shadow-sm rounded-4">
-                <div class="card-header bg-white py-3 border-bottom d-flex justify-content-between align-items-center px-4">
-                    <h6 class="mb-0 fw-bold">ผู้อพยพที่พักอยู่ปัจจุบัน</h6>
-                    <span class="badge bg-light text-primary border border-primary-subtle px-3 py-2">รวม <?php echo $current_count; ?> คน</span>
+            <!-- Evacuee List Table -->
+            <div class="card shadow-sm border-0">
+                <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0 text-dark font-weight-bold">รายชื่อผู้เข้าพัก (ปัจจุบัน)</h5>
+                    <a href="evacuee_list.php?shelter_id=<?php echo $shelter_id; ?>" class="btn btn-sm btn-outline-primary">ดูประวัติทั้งหมด</a>
                 </div>
                 <div class="card-body p-0">
                     <div class="table-responsive">
                         <table class="table table-hover align-middle mb-0">
-                            <thead class="bg-light small text-muted text-uppercase">
+                            <thead class="bg-light">
                                 <tr>
-                                    <th class="ps-4 py-3">ชื่อ-นามสกุล</th>
-                                    <th>เพศ / อายุ</th>
-                                    <th>เบอร์โทรศัพท์</th>
-                                    <th>สถานะสุขภาพ</th>
+                                    <th class="ps-4">ชื่อ-นามสกุล</th>
+                                    <th>อายุ</th>
+                                    <th>กลุ่มเปราะบาง</th>
+                                    <th>เวลาเข้าพัก</th>
+                                    <th>สถานะ</th>
                                     <th class="text-end pe-4">จัดการ</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php if ($current_count > 0): ?>
-                                    <?php foreach ($evacuees as $row): ?>
+                                <?php 
+                                // รีเซ็ต pointer ของ result set เพื่อวนลูปแสดงผล
+                                $result_people->data_seek(0);
+                                if ($result_people->num_rows > 0): 
+                                    while($row = $result_people->fetch_assoc()): 
+                                ?>
                                     <tr>
                                         <td class="ps-4">
-                                            <div class="fw-bold text-dark"><?php echo h($row['first_name'] . ' ' . $row['last_name']); ?></div>
-                                            <small class="text-muted">ID: <?php echo $row['id_card'] ?: '-'; ?></small>
+                                            <div class="fw-bold text-dark"><?php echo $row['prefix'].$row['first_name'].' '.$row['last_name']; ?></div>
+                                            <small class="text-muted">ID: <?php echo $row['id_card']; ?></small>
+                                        </td>
+                                        <td>
+                                            <?php echo $row['age']; ?> ปี 
+                                            <i class="fas <?php echo $row['gender']=='male'?'fa-male text-primary':'fa-female text-danger'; ?>"></i>
                                         </td>
                                         <td>
                                             <?php 
-                                                $gender_icon = ($row['gender'] == 'male') ? '<i class="fas fa-mars text-primary"></i>' : '<i class="fas fa-venus text-danger"></i>';
-                                                
-                                                // ตรวจสอบคอลัมน์อายุ (Age) หรือ วันเกิด (Birth Date)
-                                                $age_display = '-';
-                                                if (isset($row['age']) && $row['age'] > 0) {
-                                                    $age_display = $row['age'];
-                                                } elseif (isset($row['birth_date'])) {
-                                                    $age_display = calculateAge($row['birth_date']);
+                                            if(!empty($row['vulnerable_group'])) {
+                                                $vg = explode(',', $row['vulnerable_group']);
+                                                foreach($vg as $v) {
+                                                    if($v=='elderly') echo '<span class="badge bg-warning text-dark me-1" title="ผู้สูงอายุ"><i class="fas fa-user-clock"></i></span>';
+                                                    if($v=='child') echo '<span class="badge bg-info text-dark me-1" title="เด็กเล็ก"><i class="fas fa-baby"></i></span>';
+                                                    if($v=='bedridden') echo '<span class="badge bg-danger me-1" title="ติดเตียง"><i class="fas fa-procedures"></i></span>';
+                                                    if($v=='disabled') echo '<span class="badge bg-primary me-1" title="พิการ"><i class="fas fa-wheelchair"></i></span>';
+                                                    if($v=='pregnant') echo '<span class="badge bg-pink text-dark me-1" style="background-color:pink" title="ตั้งครรภ์"><i class="fas fa-female"></i></span>';
                                                 }
-                                                echo "$gender_icon $age_display ปี";
+                                            } else {
+                                                echo '<span class="text-muted small">-</span>';
+                                            }
                                             ?>
                                         </td>
-                                        <td><?php echo h($row['phone']); ?></td>
                                         <td>
-                                            <?php if($row['health_condition']): ?>
-                                                <span class="badge bg-danger bg-opacity-10 text-danger border border-danger-subtle small"><?php echo h($row['health_condition']); ?></span>
-                                            <?php else: ?>
-                                                <span class="badge bg-success bg-opacity-10 text-success border border-success-subtle small">ปกติ</span>
-                                            <?php endif; ?>
+                                            <?php 
+                                            $dt = strtotime($row['registered_at']);
+                                            echo date('d/m/', $dt) . (date('Y', $dt)+543) . '<br><small class="text-muted">'.date('H:i น.', $dt).'</small>';
+                                            ?>
                                         </td>
+                                        <td><?php echo getStatusBadge($row['status']); ?></td>
                                         <td class="text-end pe-4">
-                                            <div class="btn-group shadow-sm">
-                                                <a href="evacuee_card.php?id=<?php echo $row['id']; ?>" target="_blank" class="btn btn-sm btn-light border" title="พิมพ์บัตร">
-                                                    <i class="fas fa-id-card text-primary"></i>
-                                                </a>
-                                                <a href="evacuee_form.php?id=<?php echo $row['id']; ?>&mode=edit" class="btn btn-sm btn-light border ms-1" title="แก้ไข">
-                                                    <i class="fas fa-edit text-secondary"></i>
-                                                </a>
-                                            </div>
+                                            <a href="evacuee_form.php?id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-secondary" title="แก้ไข"><i class="fas fa-edit"></i></a>
+                                            <a href="evacuee_delete.php?id=<?php echo $row['id']; ?>" class="btn btn-sm btn-outline-danger" onclick="return confirm('ยืนยันการลบ?');" title="ลบ"><i class="fas fa-trash"></i></a>
                                         </td>
                                     </tr>
-                                    <?php endforeach; ?>
-                                <?php else: ?>
-                                    <tr>
-                                        <td colspan="5" class="text-center py-5 text-muted">
-                                            <i class="fas fa-user-slash fa-3x mb-3 opacity-25"></i><br>
-                                            ยังไม่มีรายชื่อผู้อพยพในศูนย์นี้
-                                        </td>
-                                    </tr>
+                                <?php endwhile; else: ?>
+                                    <tr><td colspan="6" class="text-center py-5 text-muted">ยังไม่มีผู้เข้าพักในขณะนี้</td></tr>
                                 <?php endif; ?>
                             </tbody>
                         </table>
                     </div>
                 </div>
             </div>
+
         </div>
     </div>
 </div>
